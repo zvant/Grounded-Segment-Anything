@@ -162,7 +162,10 @@ if __name__ == '__main__':
     sys.path.append(os.path.join(args.s100dir, 'scripts'))
     from evaluation import evaluate_masked
 
-    video_id_list = ['001', '003', '005', '006', '007', '008', '009', '011', '012', '013', '014', '015', '016', '017', '019', '020', '023', '025', '027', '034', '036', '039', '040', '043', '044', '046', '048', '049', '050', '051', '053', '054', '055', '056', '058', '059', '060', '066', '067', '068', '069', '070', '071', '073', '074', '075', '076', '077', '080', '085', '086', '087', '088', '090', '091', '092', '093', '094', '095', '098', '099', '105', '108', '110', '112', '114', '115', '116', '117', '118', '125', '127', '128', '129', '130', '131', '132', '135', '136', '141', '146', '148', '149', '150', '152', '154', '156', '158', '159', '160', '161', '164', '167', '169', '170', '171', '172', '175', '178', '179']
+    if args.id == 'batch':
+        video_id_list = ['001', '003', '005', '006', '007', '008', '009', '011', '012', '013', '014', '015', '016', '017', '019', '020', '023', '025', '027', '034', '036', '039', '040', '043', '044', '046', '048', '049', '050', '051', '053', '054', '055', '056', '058', '059', '060', '066', '067', '068', '069', '070', '071', '073', '074', '075', '076', '077', '080', '085', '086', '087', '088', '090', '091', '092', '093', '094', '095', '098', '099', '105', '108', '110', '112', '114', '115', '116', '117', '118', '125', '127', '128', '129', '130', '131', '132', '135', '136', '141', '146', '148', '149', '150', '152', '154', '156', '158', '159', '160', '161', '164', '167', '169', '170', '171', '172', '175', '178', '179']
+    else:
+        video_id_list = [args.id]
     text_prompt_0 = 'person . people . pedestrian . driver .'
     text_prompt_1 = 'vehicle . car . suv . bus . truck .'
 
@@ -195,14 +198,14 @@ if __name__ == '__main__':
     predictor = SamPredictor(sam_model_registry[sam_version](checkpoint=sam_checkpoint).cuda())
 
     APs = {}
-    for video_id in video_id_list[:5]:
+    for video_id in video_id_list:
         inputdir = os.path.normpath(os.path.join(args.s100dir, 'images', 'annotated', video_id))
         with open(os.path.join(inputdir, 'annotations.json'), 'r') as fp:
             images = json.load(fp)
         detections = []
         with torch.no_grad():
             for im in tqdm.tqdm(images, ascii=True, desc=video_id):
-                torch.cuda.empty_cache()
+                #torch.cuda.empty_cache()
                 im['annotations'] = []
                 f = os.path.join(inputdir, 'unmasked', im['file_name'])
                 image_pil, im_dino = load_image(f)
@@ -214,6 +217,8 @@ if __name__ == '__main__':
 
                 for c in range(0, len(text_prompt_list)):
                     boxes_filt, pred_phrases = get_grounding_output(model, im_dino, text_prompt_list[c], box_threshold, text_threshold, device='cuda')
+                    if boxes_filt.size(0) < 1:
+                        continue
                     for i in range(boxes_filt.size(0)):
                         boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
                         boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
@@ -230,7 +235,8 @@ if __name__ == '__main__':
                     )
                     for m, lb in zip(masks, pred_phrases):
                         xs, ys = np.where(m[0].t().cpu().numpy())
-                        im['annotations'].append({'bbox': list(map(float, [xs.min(), ys.min(), xs.max(), ys.max()])), 'segmentation': [], 'category_id': c, 'score': float(lb[lb.find('(') + 1 : lb.find(')')]), 'bbox_mode': BoxMode.XYXY_ABS})
+                        if xs.shape[0] > 4:
+                            im['annotations'].append({'bbox': list(map(float, [xs.min(), ys.min(), xs.max(), ys.max()])), 'segmentation': [], 'category_id': c, 'score': float(lb[lb.find('(') + 1 : lb.find(')')]), 'bbox_mode': BoxMode.XYXY_ABS})
                 detections.append(im)
 
         with contextlib.redirect_stdout(open(os.devnull, 'w')):
@@ -243,7 +249,7 @@ if __name__ == '__main__':
     for c in categories:
         _AP_videos = np.array([APs[v]['results'][c] for v in APs])
         print(c, _AP_videos.mean(axis=0))
-    with open(os.path.join(os.path.dirname(__file__), 'scenes100_APs_%s.json' % args.config), 'w') as fp:
+    with open(os.path.join(os.path.dirname(__file__), 'scenes100_APs_%s.json' % args.sam_version), 'w') as fp:
         json.dump(APs, fp)
 
 

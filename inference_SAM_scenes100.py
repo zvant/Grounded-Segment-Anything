@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import tqdm
+import math
 
 import numpy as np
 import json
@@ -201,15 +202,15 @@ if __name__ == '__main__':
         detections = []
         with torch.no_grad():
             for im in tqdm.tqdm(images, ascii=True, desc=video_id):
-                torch.cuda.empty_cache()
+                # torch.cuda.empty_cache()
                 im['annotations'] = []
                 f = os.path.join(inputdir, 'unmasked', im['file_name'])
                 image_pil, im_dino = load_image(f)
                 im_sam = cv2.imread(f)
                 im_sam = cv2.cvtColor(im_sam, cv2.COLOR_BGR2RGB)
-                # predictor.set_image(im_sam)
-                im_sam_half = cv2.resize(im_sam, [im_sam.shape[1] // 2, im_sam.shape[0] // 2], cv2.INTER_LINEAR)
-                predictor.set_image(im_sam_half)
+                predictor.set_image(im_sam)
+                # im_sam_half = cv2.resize(im_sam, [im_sam.shape[1] // 2, im_sam.shape[0] // 2], cv2.INTER_LINEAR)
+                # predictor.set_image(im_sam_half)
                 size = image_pil.size
                 H, W = size[1], size[0]
 
@@ -227,17 +228,27 @@ if __name__ == '__main__':
                 boxes_filt_classes = torch.cat(boxes_filt_classes, dim=0)
                 if boxes_filt_classes.size(0) < 1:
                     continue
-                # transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt_classes, im_sam.shape[:2]).cuda()
-                transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt_classes / 2, im_sam_half.shape[:2]).cuda()
-                masks, _, _ = predictor.predict_torch(
-                    point_coords = None,
-                    point_labels = None,
-                    boxes = transformed_boxes.cuda(),
-                    multimask_output = False,
-                )
+                transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt_classes, im_sam.shape[:2]).cuda()
+                # transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt_classes / 2, im_sam_half.shape[:2]).cuda()
+
+                masks = []
+                box_bs = 200
+                for b in range(0, math.ceil(boxes_filt_classes.size(0) / box_bs)):
+                    _boxes_batch = transformed_boxes[b * box_bs : (b + 1) * box_bs]
+                    if _boxes_batch.size(0) < 1:
+                        continue
+                    masks.append(
+                        predictor.predict_torch(
+                            point_coords = None,
+                            point_labels = None,
+                            boxes = _boxes_batch,
+                            multimask_output = False,
+                        )[0].cpu().numpy()
+                    )
+                masks = np.concatenate(masks, axis=0)
                 for m, (c, lb) in zip(masks, pred_phrases_classes):
-                    xs, ys = np.where(m[0].t().cpu().numpy())
-                    xs, ys = xs * 2, ys * 2
+                    xs, ys = np.where(m[0].T)
+                    # xs, ys = xs * 2, ys * 2
                     if xs.shape[0] > 4:
                         im['annotations'].append({'bbox': list(map(float, [xs.min(), ys.min(), xs.max(), ys.max()])), 'segmentation': [], 'category_id': c, 'score': float(lb[lb.find('(') + 1 : lb.find(')')]), 'bbox_mode': BoxMode.XYXY_ABS})
                 detections.append(im)

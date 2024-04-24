@@ -273,6 +273,18 @@ python inference_SAM_scenes100.py --config GroundingDINO/groundingdino/config/Gr
 python inference_SAM_scenes100.py --config GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py --grounded_checkpoint GroundingDINO/groundingdino_swint_ogc.pth --sam_version vit_b --sam_checkpoint sam_vit_b_01ec64.pth --id batch --s100dir ../Intersections
 
 GroundingDINO swint
-SAM ViT-B
+SAM ViT-L
+videos average:
+person [0.3542701  0.57535193]
+vehicle [0.37942078 0.55589336]
+overall [0.46816129 0.68357949]
+weighted [0.48534837 0.71429242]
 
+GroundingDINO swint
+SAM ViT-B
+videos average:
+person [0.34871872 0.57441905]
+vehicle [0.37024638 0.55418873]
+overall [0.46001884 0.68202343]
+weighted [0.47567415 0.71278502]
 '''

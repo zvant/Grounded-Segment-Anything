@@ -15,6 +15,9 @@ from groundingdino.util import box_ops
 from groundingdino.util.slconfig import SLConfig
 from groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
 
+video_id_list = ['001', '003', '005', '006', '007', '008', '009', '011', '012', '013', '014', '015', '016', '017', '019', '020', '023', '025', '027', '034', '036', '039', '040', '043', '044', '046', '048', '049', '050', '051', '053', '054', '055', '056', '058', '059', '060', '066', '067', '068', '069', '070', '071', '073', '074', '075', '076', '077', '080', '085', '086', '087', '088', '090', '091', '092', '093', '094', '095', '098', '099', '105', '108', '110', '112', '114', '115', '116', '117', '118', '125', '127', '128', '129', '130', '131', '132', '135', '136', '141', '146', '148', '149', '150', '152', '154', '156', '158', '159', '160', '161', '164', '167', '169', '170', '171', '172', '175', '178', '179']
+bbox_rgbs = ['#FF0000', '#0000FF']
+
 
 def load_image(image_path):
     # load image
@@ -76,29 +79,12 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold, w
     return boxes_filt, pred_phrases
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser('Grounding DINO example', add_help=True)
-    parser.add_argument('--config', '-c', type=str, choices=['swint', 'swinb'], required=True, help='path to config file')
-    # parser.add_argument('--checkpoint_path', '-p', type=str, required=True, help='path to checkpoint file')
-    # parser.add_argument('--image_path', '-i', type=str, required=True, help='path to image file')
-    # parser.add_argument('--text_prompt', '-t', type=str, required=True, help='text prompt')
-    # parser.add_argument('--output_dir', '-o', type=str, default='outputs', required=True, help='output directory')
-
-    parser.add_argument('--box_threshold', type=float, default=0.05, help='box threshold')
-    parser.add_argument('--text_threshold', type=float, default=0.25, help='text threshold')
-    parser.add_argument('--id', type=str, default='batch')
-    parser.add_argument('--s100dir', type=str, default='')
-
-    # parser.add_argument('--cpu-only', action='store_true', help='running on cpu only!, default=False')
-    args = parser.parse_args()
-
+def detect_scenes100(args):
     import contextlib
     from detectron2.structures import BoxMode
     sys.path.append(os.path.join(args.s100dir, 'scripts'))
     from evaluation import evaluate_masked
 
-    video_id_list = ['001', '003', '005', '006', '007', '008', '009', '011', '012', '013', '014', '015', '016', '017', '019', '020', '023', '025', '027', '034', '036', '039', '040', '043', '044', '046', '048', '049', '050', '051', '053', '054', '055', '056', '058', '059', '060', '066', '067', '068', '069', '070', '071', '073', '074', '075', '076', '077', '080', '085', '086', '087', '088', '090', '091', '092', '093', '094', '095', '098', '099', '105', '108', '110', '112', '114', '115', '116', '117', '118', '125', '127', '128', '129', '130', '131', '132', '135', '136', '141', '146', '148', '149', '150', '152', '154', '156', '158', '159', '160', '161', '164', '167', '169', '170', '171', '172', '175', '178', '179']
-    bbox_rgbs = ['#FF0000', '#0000FF']
     text_prompt_0 = 'person . people . pedestrian . driver .'
     text_prompt_1 = 'vehicle . car . suv . bus . truck .'
 
@@ -116,7 +102,7 @@ if __name__ == '__main__':
     model = load_model(config_file, checkpoint_path, cpu_only=False).to('cuda')
     model.eval()
 
-    APs = {}
+    detections_all, APs_all = {}, {}
     for video_id in video_id_list:
         inputdir = os.path.normpath(os.path.join(args.s100dir, 'images', 'annotated', video_id))
         with open(os.path.join(inputdir, 'annotations.json'), 'r') as fp:
@@ -134,18 +120,21 @@ if __name__ == '__main__':
                         im['annotations'].append({'bbox': [x1, y1, x2, y2], 'segmentation': [], 'category_id': c, 'score': float(lb[1]), 'bbox_mode': BoxMode.XYXY_ABS})
                 detections.append(im)
 
+        detections_all[video_id] = detections
         with contextlib.redirect_stdout(open(os.devnull, 'w')):
-            APs[video_id] = evaluate_masked(video_id, detections, outputfile=None)
-        del APs[video_id]['raw']
-        print(video_id, APs[video_id]['results'])
+            APs_all[video_id] = evaluate_masked(video_id, detections, outputfile=None)
+        del APs_all[video_id]['raw']
+        print(video_id, APs_all[video_id]['results'])
 
     categories = ['person', 'vehicle', 'overall', 'weighted']
     print('videos average:')
     for c in categories:
-        _AP_videos = np.array([APs[v]['results'][c] for v in APs])
+        _AP_videos = np.array([APs_all[v]['results'][c] for v in APs_all])
         print(c, _AP_videos.mean(axis=0))
-    with open(os.path.join(os.path.dirname(__file__), 'scenes100_APs_%s.json' % args.config), 'w') as fp:
-        json.dump(APs, fp)
+    with open(os.path.join(os.path.dirname(__file__), 'scenes100_APs_all_%s.json' % args.config), 'w') as fp:
+        json.dump(APs_all, fp)
+    with open(os.path.join(os.path.dirname(__file__), 'scenes100_detections_all_%s.json' % args.config), 'w') as fp:
+        json.dump(detections_all, fp)
 
         #     import matplotlib.patches as patches
         #     _, ax = plt.subplots()
@@ -159,8 +148,116 @@ if __name__ == '__main__':
         #     plt.tight_layout()
         #     plt.show()
 
+
+def saliency_kde_scenes100(args):
+    import contextlib
+    from detectron2.structures import BoxMode
+    sys.path.append(os.path.join(args.s100dir, 'scripts'))
+    from evaluation import _check_overlap, evaluate_masked
+    import imantics
+
+    with open(os.path.join(os.path.dirname(__file__), 'scenes100_detections_all_swint.json'), 'r') as fp:
+        detections_all = json.load(fp)
+    with open(os.path.join(os.path.dirname(__file__), 'scenes100_APs_all_swint.json'), 'r') as fp:
+        APs_all = json.load(fp)
+
+    for video_id in video_id_list:
+        detections = detections_all[video_id]
+        W, H = detections[0]['width'], detections[0]['height']
+        with open(os.path.join(args.s100dir, 'masks.json'), 'r') as fp:
+            mask = json.load(fp)
+        mask = {m['video']: m['polygons'] for m in mask}[video_id]
+        if len(mask) > 0:
+            m_arr = imantics.Annotation.from_polygons(mask, image=imantics.Image(np.zeros(shape=(H, W, 3), dtype=np.uint8)))
+            m_arr = np.expand_dims(m_arr.array.astype(np.float16), 2)
+        else:
+            m_arr = None
+        labels, boxes, scores = [], [], []
+        for im in detections:
+            for ann in im['annotations']:
+                assert ann['bbox_mode'] == BoxMode.XYXY_ABS
+                if not _check_overlap(m_arr, ann['bbox']):
+                    labels.append(ann['category_id'])
+                    boxes.append(ann['bbox'])
+                    scores.append(ann['score'])
+        labels = np.array(labels, dtype=np.int32)
+        scores = np.array(scores, dtype=np.float64)
+        boxes = np.array(boxes).astype(np.float64)
+        # print(boxes.min(axis=0).astype(np.int32), boxes.max(axis=0).astype(np.int32))
+
+        # gW, gH = 48, 27
+        # a, b, K = 1, 64, 100
+        # a, b, K = 1, 0.5, 100
+        for b in [0.8, 1.6]:
+            density_classes = []
+            for category_id in range(0, len(bbox_rgbs)):
+                _category_mask = (labels == category_id)
+                if _category_mask.sum() < 10:
+                    _density = np.ones(shape=(H, W), dtype=np.float64)
+                    _density /= _density.sum()
+                else:
+                    boxes_class, scores_class = boxes[_category_mask], scores[_category_mask]
+                    cx_list = (boxes_class[:, 0] + boxes_class[:, 2]) / 2
+                    cy_list = (boxes_class[:, 1] + boxes_class[:, 3]) / 2
+                    w_list = boxes_class[:, 2] - boxes_class[:, 0]
+                    h_list = boxes_class[:, 3] - boxes_class[:, 1]
+
+                    _grid = np.stack(np.meshgrid(np.arange(0, W), np.arange(0, H)), axis=2).astype(np.float64)
+                    _grid_x, _grid_y = _grid[:, :, 0], _grid[:, :, 1]
+                    _density = np.zeros_like(_grid_x)
+                    for cx, cy, w, h, s in tqdm.tqdm(zip(cx_list, cy_list, w_list, h_list, scores_class), ascii=True, total=scores_class.shape[0], desc=video_id):
+                        # _density += s * a * np.exp(-0.5 * ((_grid_x - cx) ** 2 / (b * w) + (_grid_y - cy) ** 2 / (b * h))) / (b * np.sqrt(w) * np.sqrt(h))
+                        _density += s * np.exp(-0.5 * ((_grid_x - cx) ** 2 / (b * w) + (_grid_y - cy) ** 2 / (b * h))) / (b * np.sqrt(w) * np.sqrt(h))
+                    _density /= cx_list.shape[0]
+                    # _density += 1 / (K ** 2)
+                    _density /= _density.sum()
+                # print(_density.shape)
+                density_classes.append(_density)
+            np.savez_compressed(os.path.join(os.path.dirname(__file__), 'KDE', '%s.b%.2f.npz' % (video_id, b)), saliency=np.stack(density_classes, axis=0))
+            # print(APs_all[video_id]['results'])
+            # for im in detections:
+            #     for ann in im['annotations']:
+            #         assert ann['bbox_mode'] == BoxMode.XYXY_ABS
+            #         x1, y1, x2, y2 = map(round, ann['bbox'])
+            #         x1, y1, x2, y2 = max(0, x1), max(0, y1), min(x2, W), min(y2, H)
+            #         xc, yc = map(round, [(x1 + x2) / 2, (y1 + y2) / 2])
+            #         ann['density_mean'] = density_classes[ann['category_id']][y1 : y2, x1 : x2].mean()
+            # plt.figure()
+            # for category_id in range(0, len(bbox_rgbs)):
+            #     plt.subplot(1, 2, category_id + 1)
+            #     _im = density_classes[category_id]
+            #     _im /= _im.max()
+            #     _im[:50, :20] = 1.0
+            #     plt.imshow(_im)
+            # plt.show()
+            # exit()
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser('Grounding DINO example', add_help=True)
+    parser.add_argument('--opt', type=str)
+    parser.add_argument('--config', '-c', type=str, choices=['swint', 'swinb'], help='path to config file')
+    # parser.add_argument('--checkpoint_path', '-p', type=str, required=True, help='path to checkpoint file')
+    # parser.add_argument('--image_path', '-i', type=str, required=True, help='path to image file')
+    # parser.add_argument('--text_prompt', '-t', type=str, required=True, help='text prompt')
+    # parser.add_argument('--output_dir', '-o', type=str, default='outputs', required=True, help='output directory')
+
+    parser.add_argument('--box_threshold', type=float, default=0.05, help='box threshold')
+    parser.add_argument('--text_threshold', type=float, default=0.25, help='text threshold')
+    parser.add_argument('--id', type=str, default='batch')
+    parser.add_argument('--s100dir', type=str, default='')
+
+    # parser.add_argument('--cpu-only', action='store_true', help='running on cpu only!, default=False')
+    args = parser.parse_args()
+
+    if args.opt == 'detect':
+        detect_scenes100(args)
+    if args.opt == 'kde':
+        saliency_kde_scenes100(args)
+
 '''
-python inference_DINO_scenes100.py --config swint --id batch --s100dir ../../Intersections
+python inference_DINO_scenes100.py --opt detect --config swint --id batch --s100dir ../../Intersections
+python inference_DINO_scenes100.py --opt kde --s100dir ../../Intersections
 
 GroundingDINO swint
 videos average:

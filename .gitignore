@@ -133,3 +133,8 @@ dmypy.json
 outputs/
 
 .idea/
+
+*.json
+*.pdf
+*.npy
+*.npz

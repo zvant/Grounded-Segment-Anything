@@ -161,6 +161,7 @@ def saliency_kde_scenes100(args):
     with open(os.path.join(os.path.dirname(__file__), 'scenes100_APs_all_swint.json'), 'r') as fp:
         APs_all = json.load(fp)
 
+    # for video_id in ['050']:
     for video_id in video_id_list:
         detections = detections_all[video_id]
         W, H = detections[0]['width'], detections[0]['height']
@@ -185,10 +186,17 @@ def saliency_kde_scenes100(args):
         boxes = np.array(boxes).astype(np.float64)
         # print(boxes.min(axis=0).astype(np.int32), boxes.max(axis=0).astype(np.int32))
 
+        # plt.figure()
+        # plt.scatter((boxes[:, 0] +  boxes[:, 2]) / 2, (boxes[:, 1] +  boxes[:, 3]) / 2, marker='x')
+        # plt.xlim(0, W)
+        # plt.ylim(H, 0)
+        # plt.title(video_id)
+        # plt.show()
+
         # gW, gH = 48, 27
         # a, b, K = 1, 64, 100
         # a, b, K = 1, 0.5, 100
-        for b in [0.8, 1.6]:
+        for b in [0.8, 1.6, 3]:
             density_classes = []
             for category_id in range(0, len(bbox_rgbs)):
                 _category_mask = (labels == category_id)
@@ -197,6 +205,10 @@ def saliency_kde_scenes100(args):
                     _density /= _density.sum()
                 else:
                     boxes_class, scores_class = boxes[_category_mask], scores[_category_mask]
+                    _areas = (boxes_class[:, 2] - boxes_class[:, 0]) * (boxes_class[:, 3] - boxes_class[:, 1])
+                    _keep = np.logical_and(scores_class >= max(0.4, np.percentile(scores_class, 90)), _areas >= 200)
+                    # print(video_id, category_id, scores_class.shape, _keep.sum())
+                    boxes_class, scores_class = boxes_class[_keep], scores_class[_keep]
                     cx_list = (boxes_class[:, 0] + boxes_class[:, 2]) / 2
                     cy_list = (boxes_class[:, 1] + boxes_class[:, 3]) / 2
                     w_list = boxes_class[:, 2] - boxes_class[:, 0]
@@ -213,7 +225,7 @@ def saliency_kde_scenes100(args):
                     _density /= _density.sum()
                 # print(_density.shape)
                 density_classes.append(_density)
-            np.savez_compressed(os.path.join(os.path.dirname(__file__), 'KDE', '%s.b%.2f.npz' % (video_id, b)), saliency=np.stack(density_classes, axis=0))
+            np.savez_compressed(os.path.join(os.path.dirname(__file__), 'KDE_thres', '%s.b%.2f.npz' % (video_id, b)), saliency=np.stack(density_classes, axis=0))
             # print(APs_all[video_id]['results'])
             # for im in detections:
             #     for ann in im['annotations']:

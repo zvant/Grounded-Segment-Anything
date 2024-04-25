@@ -1,7 +1,9 @@
 import argparse
 import os
 import sys
+import gc
 import tqdm
+import random
 import math
 
 import numpy as np
@@ -19,16 +21,19 @@ from GroundingDINO.groundingdino.models import build_model
 from GroundingDINO.groundingdino.util.slconfig import SLConfig
 from GroundingDINO.groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
 
+from torchvision.ops.boxes import batched_nms
 
 # segment anything
 from segment_anything import (
     sam_model_registry,
     sam_hq_model_registry,
-    SamPredictor
+    SamPredictor,
 )
+from segment_anything.utils.amg import batched_mask_to_box, remove_small_regions
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 
 
 def load_image(image_path):
@@ -138,26 +143,7 @@ def save_mask_data(output_dir, mask_list, box_list, label_list):
         json.dump(json_data, f)
 
 
-if __name__ == '__main__':
-
-    parser = argparse.ArgumentParser('Grounded-Segment-Anything Demo', add_help=True)
-    parser.add_argument('--config', type=str, required=True, help='path to config file')
-    parser.add_argument('--grounded_checkpoint', type=str, required=True, help='path to checkpoint file')
-    parser.add_argument('--sam_version', type=str, default='vit_h', required=False, help='SAM ViT version: vit_b / vit_l / vit_h')
-    parser.add_argument('--sam_checkpoint', type=str, required=False, help='path to sam checkpoint file')
-    # parser.add_argument('--sam_hq_checkpoint', type=str, default=None, help='path to sam-hq checkpoint file')
-    # parser.add_argument('--use_sam_hq', action='store_true', help='using sam-hq for prediction')
-    # parser.add_argument('--input_image', type=str, required=True, help='path to image file')
-    # parser.add_argument('--text_prompt', type=str, required=True, help='text prompt')
-    # parser.add_argument('--output_dir', '-o', type=str, default='outputs', required=True, help='output directory')
-
-    parser.add_argument('--box_threshold', type=float, default=0.05, help='box threshold')
-    parser.add_argument('--text_threshold', type=float, default=0.25, help='text threshold')
-    parser.add_argument('--id', type=str, default='batch')
-    parser.add_argument('--s100dir', type=str, default='')
-    # parser.add_argument('--device', type=str, default='cpu', help='running on cpu only!, default=False')
-    args = parser.parse_args()
-
+def detect_from_dino(args):
     import contextlib
     from detectron2.structures import BoxMode
     sys.path.append(os.path.join(args.s100dir, 'scripts'))
@@ -267,10 +253,129 @@ if __name__ == '__main__':
         json.dump(APs, fp)
 
 
+def detect_from_kde(args):
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    def _add_boxes(ax, boxes, scores, thres=0.5):
+        for (x1, y1, x2, y2), s in zip(boxes, scores):
+            if s < thres:
+                continue
+            rect = patches.Rectangle((x1, y1), x2 - x1, y2 - y1, linewidth=1, edgecolor='r', facecolor='none')
+            ax.add_patch(rect)
+
+    def _get_image_masks(masks, scores, thres=0.5):
+        masks = sorted(list(masks), key=lambda m: m.sum() * -1)
+        image = np.zeros((masks[0].shape[0], masks[0].shape[1], 4))
+        for m, s in zip(masks, scores):
+            if s >= thres:
+                image[m] = np.concatenate([np.random.random(3), [0.5]])
+        return image
+
+    with open(os.path.join(os.path.dirname(__file__), 'GroundingDINO', 'scenes100_detections_all_swint.json'), 'r') as fp:
+        detections_all = json.load(fp)
+
+    predictor = SamPredictor(sam_model_registry[args.sam_version](checkpoint=args.sam_checkpoint).cuda())
+    num_queries = 200
+    for video_id, detections in detections_all.items():
+        # if video_id <= '160':
+        #     continue
+        npz = np.load(os.path.join(os.path.dirname(__file__), 'GroundingDINO', 'KDE_thres', '%s.b3.00.npz' % video_id))
+        saliency = npz['saliency']
+        npz.close()
+        points_classes = []
+        for k in range(0, saliency.shape[0]):
+            points, stride = [], 16
+            for x in range(stride, saliency.shape[2], stride):
+                for y in range(stride, saliency.shape[1], stride):
+                    points.append([x, y, saliency[k, y - stride : y + stride, x - stride : x + stride].mean()])
+            random.shuffle(points)
+            points_classes.append(np.array(sorted(points, key=lambda t: t[2] * -1))[:num_queries])
+            # points_classes.append(np.array([[10, 10, 1], [1900, 1060, 1]]))
+
+        inputdir = os.path.normpath(os.path.join(args.s100dir, 'images', 'annotated', video_id))
+        detections_sam = []
+        if len(detections) > 8:
+            detections = detections[::len(detections) // 8]
+        for im in tqdm.tqdm(detections, ascii=True, desc=video_id):
+            im_sam = cv2.imread(os.path.join(inputdir, 'unmasked', im['file_name']))
+            im_sam = cv2.cvtColor(im_sam, cv2.COLOR_BGR2RGB)
+            predictor.set_image(im_sam)
+            results_classes = []
+            for k in range(0, len(points_classes)):
+                point_coords = predictor.transform.apply_coords(points_classes[k][:, :2], im_sam.shape[:2])
+                masks, mask_scores, _ = predictor.predict_torch(
+                    point_coords = torch.from_numpy(point_coords).unsqueeze(1).cuda(),
+                    point_labels = torch.ones(points_classes[k].shape[0], dtype=torch.long).unsqueeze(1).cuda(),
+                    boxes = None,
+                    multimask_output = False,
+                )
+                masks, mask_scores = masks[:, 0, :, :], mask_scores[:, 0]
+                for i in range(0, masks.size(0)):
+                    _m = remove_small_regions(masks[i].cpu().numpy(), 16, mode='holes')[0]
+                    masks[i] = torch.from_numpy(remove_small_regions(_m, 16, mode='islands')[0])
+                boxes = batched_mask_to_box(masks)
+                # print(boxes.min(dim=0), boxes.max(dim=0))
+                keep_by_nms = batched_nms(boxes.float(), mask_scores, torch.zeros_like(boxes[:, 0]), iou_threshold=0.7)
+                # print(masks.size(), mask_scores.size(), mask_scores.min(), mask_scores.max(), mask_scores.mean(), boxes.size(), keep_by_nms.size())
+                masks, boxes, mask_scores = masks[keep_by_nms], boxes[keep_by_nms], mask_scores[keep_by_nms]
+                results_classes.append({'masks': _get_image_masks(masks.cpu().numpy(), mask_scores.cpu().numpy(), thres=0), 'boxes': boxes.cpu().numpy(), 'scores': mask_scores.cpu().numpy()})
+            detections_sam.append({'image': im_sam, 'results': results_classes})
+
+        with PdfPages(os.path.join(os.path.dirname(__file__), 'GroundingDINO', 'KDE_thres', 'sam_%s.pdf' % video_id)) as pdf:
+            for i in range(0, len(detections_sam)):
+                _, axes = plt.subplots(3, 2, figsize=(16, 14))
+                axes[0][0].imshow(saliency[0], cmap='gray')
+                axes[0][0].set_title('person KDE')
+                axes[0][1].imshow(saliency[1], cmap='gray')
+                axes[0][1].set_title('vehicle KDE')
+
+                for k in range(0, len(points_classes)):
+                    axes[1][k].imshow(detections_sam[i]['image'])
+                    axes[1][k].scatter(points_classes[k][:, 0], points_classes[k][:, 1], marker='x', c='r')
+                    axes[1][k].set_xlim(0, saliency.shape[2])
+                    axes[1][k].set_ylim(saliency.shape[1], 0)
+                    axes[1][k].set_title('%d prompt points' % points_classes[k].shape[0])
+
+                    axes[2][k].imshow(detections_sam[i]['image'].mean(axis=2), cmap='gray')
+                    axes[2][k].imshow(detections_sam[i]['results'][k]['masks'])
+                    axes[2][k].set_title('%s masks' % detections_sam[i]['results'][k]['scores'].shape[0])
+                plt.tight_layout()
+                pdf.savefig()
+                plt.close()
+        del detections_sam, pdf
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser('Grounded-Segment-Anything Demo', add_help=True)
+    parser.add_argument('--opt', type=str)
+    parser.add_argument('--config', type=str, help='path to config file')
+    parser.add_argument('--grounded_checkpoint', type=str, help='path to checkpoint file')
+    parser.add_argument('--sam_version', type=str, default='vit_h', help='SAM ViT version: vit_b / vit_l / vit_h')
+    parser.add_argument('--sam_checkpoint', type=str, help='path to sam checkpoint file')
+    # parser.add_argument('--sam_hq_checkpoint', type=str, default=None, help='path to sam-hq checkpoint file')
+    # parser.add_argument('--use_sam_hq', action='store_true', help='using sam-hq for prediction')
+    # parser.add_argument('--input_image', type=str, required=True, help='path to image file')
+    # parser.add_argument('--text_prompt', type=str, required=True, help='text prompt')
+    # parser.add_argument('--output_dir', '-o', type=str, default='outputs', required=True, help='output directory')
+
+    parser.add_argument('--box_threshold', type=float, default=0.05, help='box threshold')
+    parser.add_argument('--text_threshold', type=float, default=0.25, help='text threshold')
+    parser.add_argument('--id', type=str, default='batch')
+    parser.add_argument('--s100dir', type=str, default='')
+    # parser.add_argument('--device', type=str, default='cpu', help='running on cpu only!, default=False')
+    args = parser.parse_args()
+    if args.opt == 'detect':
+        detect_from_dino(args)
+    if args.opt == 'kde_sample':
+        detect_from_kde(args)
+
+
 '''
-python inference_SAM_scenes100.py --config GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py --grounded_checkpoint GroundingDINO/groundingdino_swint_ogc.pth --sam_checkpoint sam_vit_h_4b8939.pth --id batch --s100dir ../Intersections
-python inference_SAM_scenes100.py --config GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py --grounded_checkpoint GroundingDINO/groundingdino_swint_ogc.pth --sam_version vit_l --sam_checkpoint sam_vit_l_0b3195.pth --id batch --s100dir ../Intersections
-python inference_SAM_scenes100.py --config GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py --grounded_checkpoint GroundingDINO/groundingdino_swint_ogc.pth --sam_version vit_b --sam_checkpoint sam_vit_b_01ec64.pth --id batch --s100dir ../Intersections
+python inference_SAM_scenes100.py --opt detect --config GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py --grounded_checkpoint GroundingDINO/groundingdino_swint_ogc.pth --sam_checkpoint sam_vit_h_4b8939.pth --id batch --s100dir ../Intersections
+python inference_SAM_scenes100.py --opt detect --config GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py --grounded_checkpoint GroundingDINO/groundingdino_swint_ogc.pth --sam_version vit_l --sam_checkpoint sam_vit_l_0b3195.pth --id batch --s100dir ../Intersections
+python inference_SAM_scenes100.py --opt detect --config GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py --grounded_checkpoint GroundingDINO/groundingdino_swint_ogc.pth --sam_version vit_b --sam_checkpoint sam_vit_b_01ec64.pth --id batch --s100dir ../Intersections
 
 GroundingDINO swint
 SAM ViT-L
@@ -287,4 +392,6 @@ person [0.34871872 0.57441905]
 vehicle [0.37024638 0.55418873]
 overall [0.46001884 0.68202343]
 weighted [0.47567415 0.71278502]
+
+python inference_SAM_scenes100.py --opt kde_sample --sam_version vit_l --sam_checkpoint sam_vit_l_0b3195.pth --s100dir ../Intersections
 '''
